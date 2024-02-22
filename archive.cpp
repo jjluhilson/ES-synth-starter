@@ -40,9 +40,7 @@ volatile uint32_t currentStepSize;
 const char noteNames[12][3] = {"C", "C#", "D", "Eb", "E", "F", "F#", "G", "G#", "A", "Bb", "B"};
 
 struct {
-  std::bitset<32> inputs;
-  bool pressed = false;
-  int lastPressed;
+std::bitset<32> inputs;  
 } sysState;
 
 //Display driver object
@@ -53,6 +51,7 @@ void sampleISRv() {
   phaseAcc += currentStepSize;
 
   int32_t Vout = (phaseAcc >> 24) - 128;
+  // Serial.println(Vout + 128);
   analogWrite(OUTR_PIN, Vout + 128);
 }
 
@@ -91,8 +90,10 @@ void scanKeysTask(void * pvParameters) {
   const TickType_t xFrequency = 50/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
+  // Serial.print("test");
   while (1) {
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    // Serial.print("test1");
     std::bitset<32> inputs;
     static std::bitset<32> prevInputs;
     static int firstKeyPressed, lastKeyPress;
@@ -136,46 +137,14 @@ void scanKeysTask(void * pvParameters) {
     std::bitset<32> mask = 0b00000000000000000000111111111111;
     std::bitset<12> last12 = std::bitset<12>((inputs & mask).to_ulong());
     if (!last12.all()) { // if any pressed - active low
-      // u8g2.setCursor(2,30);
-      // u8g2.print(noteNames[lastKeyPress]);
-      sysState.lastPressed = lastKeyPress;
-      sysState.pressed = true;
+      u8g2.setCursor(2,30);
+      u8g2.print(noteNames[lastKeyPress]);
     } else {
       currentStepSize = 0;
-      sysState.pressed = false;
     }
 
     sysState.inputs = inputs;
     prevInputs = inputs;
-  }
-}
-
-void displayUpdateTask(void * pvParameters) {
-  const TickType_t xFrequency = 100/portTICK_PERIOD_MS;
-  TickType_t xLastWakeTime = xTaskGetTickCount();
-  
-  while (1) {
-    vTaskDelayUntil(&xLastWakeTime, xFrequency);
-
-    //Update display
-    u8g2.clearBuffer();         // clear the internal memory
-    u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
-    u8g2.drawStr(2,10,"Hello World!");  // write something to the internal memory
-    // Serial.println(currentStepSize);
-
-
-    u8g2.setCursor(2,20);
-    u8g2.print(sysState.inputs.to_ulong(),HEX);
-    
-    if (sysState.pressed) {
-      u8g2.setCursor(2,30);
-      u8g2.print(noteNames[sysState.lastPressed]);
-    }
-
-    u8g2.sendBuffer();          // transfer internal memory to the display
-
-    //Toggle LED
-    digitalToggle(LED_BUILTIN);
   }
 }
 
@@ -231,17 +200,8 @@ void setup() {
   "scanKeys",		/* Text name for the task */
   64,      		/* Stack size in words, not bytes */
   NULL,			/* Parameter passed into the task */
-  2,			/* Task priority */
-  &scanKeysHandle );	/* Pointer to store the task handle */
-  
-  TaskHandle_t displayUpdateHandle = NULL;
-  xTaskCreate(
-  displayUpdateTask,		/* Function that implements the task */
-  "displayUpdate",		/* Text name for the task */
-  64,      		/* Stack size in words, not bytes */
-  NULL,			/* Parameter passed into the task */
   1,			/* Task priority */
-  &displayUpdateHandle );	/* Pointer to store the task handle */
+  &scanKeysHandle );	/* Pointer to store the task handle */
   
   vTaskStartScheduler();
 
@@ -251,6 +211,32 @@ void setup() {
 }
 
 void loop() {
+  // Serial.println("start");
   // put your main code here, to run repeatedly:
-  Serial.print("main");
+  static uint32_t next = millis();
+  static uint32_t count = 0;
+
+  while (millis() < next);  //Wait for next interval
+
+  next += interval;
+
+  //Update display
+  u8g2.clearBuffer();         // clear the internal memory
+  u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
+  u8g2.drawStr(2,10,"Hello World!");  // write something to the internal memory
+  // u8g2.setCursor(2,20);
+  // u8g2.print(count++);
+  // scanKeysTask(NULL);
+  Serial.println(currentStepSize);
+
+
+  u8g2.setCursor(2,20);
+  u8g2.print(sysState.inputs.to_ulong(),HEX);
+  // u8g2.print(inputs.to_ulong(),HEX);
+
+  u8g2.sendBuffer();          // transfer internal memory to the display
+
+  //Toggle LED
+  digitalToggle(LED_BUILTIN);
+  // Serial.println("end");
 }
