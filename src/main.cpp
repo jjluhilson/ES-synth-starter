@@ -43,6 +43,8 @@ struct {
   std::bitset<32> inputs;
   bool pressed = false;
   int lastPressed;
+  int knob3rotation = 0;
+  SemaphoreHandle_t mutex;  
 } sysState;
 
 //Display driver object
@@ -53,6 +55,9 @@ void sampleISRv() {
   phaseAcc += currentStepSize;
 
   int32_t Vout = (phaseAcc >> 24) - 128;
+  
+  int knob3rotation = __atomic_load_n(&sysState.knob3rotation, __ATOMIC_RELAXED);
+  Vout = Vout >> (8 - knob3rotation);
   analogWrite(OUTR_PIN, Vout + 128);
 }
 
@@ -67,10 +72,14 @@ void setRow(uint8_t rowIdx) {
     digitalWrite(RA2_PIN, LOW);
     digitalWrite(RA1_PIN, LOW);
     digitalWrite(RA0_PIN, HIGH);
-  } else {
+  } else if (rowIdx == 2) {
     digitalWrite(RA2_PIN, LOW);
     digitalWrite(RA1_PIN, HIGH);
     digitalWrite(RA0_PIN, LOW);
+  } else {
+    digitalWrite(RA2_PIN, LOW);
+    digitalWrite(RA1_PIN, HIGH);
+    digitalWrite(RA0_PIN, HIGH);
   }
 
   digitalWrite(REN_PIN, HIGH);
@@ -88,7 +97,7 @@ std::bitset<4> readCols(){
 }
 
 void scanKeysTask(void * pvParameters) {
-  const TickType_t xFrequency = 50/portTICK_PERIOD_MS;
+  const TickType_t xFrequency = 20/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
@@ -99,18 +108,22 @@ void scanKeysTask(void * pvParameters) {
 
     setRow(0);
     delayMicroseconds(3);
-    std::bitset<4> col1 = readCols();
+    std::bitset<4> row0 = readCols();
     setRow(1);
     delayMicroseconds(3);
-    std::bitset<4> col2 = readCols();
+    std::bitset<4> row1 = readCols();
     setRow(2);
     delayMicroseconds(3);
-    std::bitset<4> col3 = readCols();
+    std::bitset<4> row2 = readCols();
+    setRow(3);
+    delayMicroseconds(3);
+    std::bitset<4> row3 = readCols();
 
     for (int i = 0; i < 4; i++) {
-        inputs[i] = col1[i];
-        inputs[i + 4] = col2[i];
-        inputs[i + 8] = col3[i];
+        inputs[i] = row0[i];
+        inputs[i + 4] = row1[i];
+        inputs[i + 8] = row2[i];
+        inputs[i + 12] = row3[i];
     }
 
     if (prevInputs != inputs) {
@@ -120,21 +133,72 @@ void scanKeysTask(void * pvParameters) {
       //   Serial.print(change[i]);
       // }
       // Serial.println();
+
+      std::bitset<2> knob3prev;
+      knob3prev[0] = prevInputs[12];
+      knob3prev[1] = prevInputs[13];
+
+      std::bitset<2> knob3;
+      knob3[0] = inputs[12];
+      knob3[1] = inputs[13];
+
+      // if (knob3[0] ^ knob3[1] == 0) {
+      //   knob3prev[0] = prevInputs[12];
+      //   knob3prev[1] = prevInputs[13];
+      // }
+      static bool prevknob3Rotation = false;
+
+      xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+      int knob3rotation = sysState.knob3rotation;
+      xSemaphoreGive(sysState.mutex);
+
+      if (knob3prev[0] != knob3[0] || knob3prev[1] != knob3[1]) { // going to update
+        if ((knob3prev ^ knob3).to_ulong() == 1) {
+          if (knob3[0] == knob3[1]) {
+            // -1
+            // sysState.knob3rotation--;
+            prevknob3Rotation = false;
+          } else {
+            // +1
+            // sysState.knob3rotation++;
+            prevknob3Rotation = true;
+          }
+        }
+        
+        if ((knob3prev ^ knob3).to_ulong() == 1 || (knob3prev ^ knob3).to_ulong() == 3) { // missed state
+          xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+          if (prevknob3Rotation && sysState.knob3rotation < 8) {
+            sysState.knob3rotation++;
+          } else if (!prevknob3Rotation && sysState.knob3rotation > 0) {
+            sysState.knob3rotation--;
+          }
+          xSemaphoreGive(sysState.mutex);
+        }
+      }
       
+
+
+      bool keyPressed = false;
       for (firstKeyPressed = 0; firstKeyPressed < 12; firstKeyPressed++) {
         if (change[0] == 1) {
+          keyPressed = true;
           break;
         } else {
           change = change >> 1;
         }
       }
-      lastKeyPress = firstKeyPressed;
-      uint32_t newStepSize = stepSizes[lastKeyPress];
-      __atomic_store_n(&currentStepSize, newStepSize, __ATOMIC_RELAXED);
+
+      if (keyPressed) {
+        lastKeyPress = firstKeyPressed;
+        uint32_t newStepSize = stepSizes[lastKeyPress];
+        __atomic_store_n(&currentStepSize, newStepSize, __ATOMIC_RELAXED);
+      }
     }
 
     std::bitset<32> mask = 0b00000000000000000000111111111111;
     std::bitset<12> last12 = std::bitset<12>((inputs & mask).to_ulong());
+
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
     if (!last12.all()) { // if any pressed - active low
       // u8g2.setCursor(2,30);
       // u8g2.print(noteNames[lastKeyPress]);
@@ -147,6 +211,7 @@ void scanKeysTask(void * pvParameters) {
 
     sysState.inputs = inputs;
     prevInputs = inputs;
+    xSemaphoreGive(sysState.mutex);
   }
 }
 
@@ -163,7 +228,7 @@ void displayUpdateTask(void * pvParameters) {
     u8g2.drawStr(2,10,"Hello World!");  // write something to the internal memory
     // Serial.println(currentStepSize);
 
-
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
     u8g2.setCursor(2,20);
     u8g2.print(sysState.inputs.to_ulong(),HEX);
     
@@ -171,6 +236,10 @@ void displayUpdateTask(void * pvParameters) {
       u8g2.setCursor(2,30);
       u8g2.print(noteNames[sysState.lastPressed]);
     }
+
+    u8g2.setCursor(32,30);
+    u8g2.print(sysState.knob3rotation);
+    xSemaphoreGive(sysState.mutex);
 
     u8g2.sendBuffer();          // transfer internal memory to the display
 
@@ -224,6 +293,8 @@ void setup() {
   sampleTimer->setOverflow(22000, HERTZ_FORMAT);
   sampleTimer->attachInterrupt(sampleISRv);
   sampleTimer->resume();
+
+  sysState.mutex = xSemaphoreCreateMutex();
 
   TaskHandle_t scanKeysHandle = NULL;
   xTaskCreate(
